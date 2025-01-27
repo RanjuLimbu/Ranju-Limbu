@@ -1,0 +1,127 @@
+import cv2
+import numpy as np
+from datetime import datetime
+import urllib.request
+import os
+from google.colab.patches import cv2_imshow
+
+# Automatically download YOLOv3 model files if they do not exist
+def download_model_files():
+    base_url_weights = "https://github.com/AlexeyAB/darknet/releases/download/yolov4/"
+    base_url_cfg = "https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/"
+    base_url_names = "https://raw.githubusercontent.com/pjreddie/darknet/master/data/"
+
+    files = {
+        "yolov3.weights": base_url_weights + "yolov3.weights",
+        "yolov3.cfg": base_url_cfg + "yolov3.cfg",
+        "coco.names": base_url_names + "coco.names"
+    }
+
+    os.makedirs("models", exist_ok=True)
+
+    for file_name, url in files.items():
+        file_path = os.path.join("models", file_name)
+        if not os.path.exists(file_path):
+            print(f"Downloading {file_name} from {url}...")
+            urllib.request.urlretrieve(url, file_path)
+            print(f"{file_name} downloaded.")
+        else:
+            print(f"{file_name} already exists.")
+
+    return (
+        os.path.join("models", "yolov3.weights"),
+        os.path.join("models", "yolov3.cfg"),
+        os.path.join("models", "coco.names")
+    )
+
+# Download model files
+weights_path, config_path, labels_path = download_model_files()
+
+# Load pre-trained YOLO model
+net = cv2.dnn.readNet(weights_path, config_path)
+
+# Load class labels
+with open(labels_path, "r") as f:
+    classes = f.read().strip().split("\n")
+
+# Function to log detected hygiene issues
+def log_issue(issue_type, location):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open("hygiene_log.txt", "a") as log_file:
+        log_file.write(f"{timestamp} - {issue_type} at {location}\n")
+    print(f"Logged: {issue_type} at {location}")
+
+# Function to classify image hygiene with percentage
+def classify_hygiene_with_percentage(image, detected_classes, confidences):
+    hygiene_related = ["dirt", "dust", "no_gloves", "no_gown"]
+    hygiene_issues = sum([1 for cls in detected_classes if cls in hygiene_related])
+    total_detected = len(detected_classes)
+
+    if total_detected == 0:
+        return "Hygienic", 100.0
+
+    hygiene_percentage = (1 - hygiene_issues / total_detected) * 100
+    return ("Hygienic" if hygiene_percentage >= 50 else "Unhygienic", hygiene_percentage)
+
+# Function to detect objects in the image
+def detect_objects(image):
+    height, width = image.shape[:2]
+    blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+    net.setInput(blob)
+    outs = net.forward(net.getUnconnectedOutLayersNames())
+
+    class_ids = []
+    confidences = []
+    boxes = []
+
+    for out in outs:
+        for detection in out:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if confidence > 0.3:  # Lowered confidence threshold
+                center_x = int(detection[0] * width)
+                center_y = int(detection[1] * height)
+                w = int(detection[2] * width)
+                h = int(detection[3] * height)
+
+                x = int(center_x - w / 2)
+                y = int(center_y - h / 2)
+
+                boxes.append([x, y, w, h])
+                confidences.append(float(confidence))
+                class_ids.append(class_id)
+
+    return class_ids, confidences, boxes
+
+# Load the image from file
+image_path = "/istockphoto-1208495734-612x612.jpg"  # Replace with your image file path
+image = cv2.imread(image_path)
+if image is None:
+    print("Error: Unable to load image.")
+else:
+    class_ids, confidences, boxes = detect_objects(image)
+
+    detected_classes = []
+    for i in range(len(boxes)):
+        x, y, w, h = boxes[i]
+        label = str(classes[class_ids[i]])
+        confidence = confidences[i]
+        detected_classes.append(label)
+
+        # Draw bounding box and label
+        cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(image, f"{label} {confidence:.2f}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # Log issues if necessary
+        if label in ["dirt", "dust", "no_gloves", "no_gown"]:
+            log_issue(f"Hygiene issue detected: {label}", f"Location: ({x}, {y})")
+
+    # Classify hygiene and display result
+    hygiene_status, hygiene_percentage = classify_hygiene_with_percentage(image, detected_classes, confidences)
+    print(f"Hygiene Status: {hygiene_status} ({hygiene_percentage:.2f}%)")
+
+    # Display the image
+    cv2_imshow(image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
